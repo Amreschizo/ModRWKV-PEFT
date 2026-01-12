@@ -6,6 +6,49 @@ import sys
 import logging
 logging.basicConfig(level=logging.INFO)
 from typing import Optional, Dict, Sequence, List, Literal
+import torch
+
+def detect_model_dimensions(checkpoint_path):
+    """
+    Auto-detect n_embd, n_layer, vocab_size, and n_head from RWKV checkpoint file.
+    Returns (n_embd, n_layer, vocab_size, n_head) or None if detection fails.
+    """
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        return None
+    
+    try:
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        
+        # Detect n_embd from embedding weight
+        if 'emb.weight' in state_dict:
+            vocab_size, n_embd = state_dict['emb.weight'].shape
+        else:
+            return None
+        
+        # Detect n_layer by finding max layer index
+        n_layer = 0
+        for key in state_dict.keys():
+            if 'blocks.' in key:
+                try:
+                    layer_id = int(key.split('.')[1])
+                    n_layer = max(n_layer, layer_id + 1)
+                except (ValueError, IndexError):
+                    continue
+        
+        if n_layer == 0:
+            return None
+        
+        # Detect n_head from r_k shape (if available)
+        n_head = None
+        if 'blocks.0.att.r_k' in state_dict:
+            n_head, head_size = state_dict['blocks.0.att.r_k'].shape
+            # Verify: n_head * head_size should equal n_embd (or dim_att)
+            # For RWKV-7, dim_att = n_embd typically
+        
+        return n_embd, n_layer, vocab_size, n_head
+    except Exception as e:
+        logging.warning(f"Failed to auto-detect model dimensions: {e}")
+        return None
 
 def rwkv_train():
     from argparse import ArgumentParser
@@ -215,11 +258,22 @@ def rwkv_train():
     except:
         deepspeed_version = None
         pass
+    
+    # Determine RWKV version from my_testing
+    rwkv_version = "RWKV-5"  # default
+    if hasattr(args, 'my_testing'):
+        if 'x070' in args.my_testing or 'x07' in args.my_testing:
+            rwkv_version = "RWKV-7"
+        elif 'x060' in args.my_testing or 'x06' in args.my_testing:
+            rwkv_version = "RWKV-6"
+        elif 'x050' in args.my_testing or 'x05' in args.my_testing:
+            rwkv_version = "RWKV-5"
+    
     rank_zero_info(
         f"""
 ############################################################################
 #
-# RWKV-5 {args.precision.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
+# {rwkv_version} {args.precision.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
 #
 # Data = {args.data_file} ({args.data_type}), ProjDir = {args.proj_dir}
 #
@@ -275,14 +329,56 @@ def rwkv_train():
 
     ########################################################################################################
 
+    # Auto-detect model dimensions from checkpoint BEFORE creating model
+    if args.load_model:
+        detected = detect_model_dimensions(args.load_model)
+        if detected:
+            n_embd_detected, n_layer_detected, vocab_size_detected, n_head_detected = detected
+            # Only override if user didn't explicitly set different values
+            # Check if the detected values differ significantly from defaults
+            if args.n_embd == 512 or args.n_embd == 1024:  # Common defaults
+                if n_embd_detected != args.n_embd:
+                    rank_zero_info(f"Auto-detected n_embd={n_embd_detected} from checkpoint (was {args.n_embd})")
+                    args.n_embd = n_embd_detected
+            if args.n_layer == 6 or args.n_layer == 24:  # Common defaults
+                if n_layer_detected != args.n_layer:
+                    rank_zero_info(f"Auto-detected n_layer={n_layer_detected} from checkpoint (was {args.n_layer})")
+                    args.n_layer = n_layer_detected
+            if args.vocab_size == 0 or args.vocab_size == 65536:  # Common defaults
+                if vocab_size_detected != args.vocab_size:
+                    rank_zero_info(f"Auto-detected vocab_size={vocab_size_detected} from checkpoint (was {args.vocab_size})")
+                    args.vocab_size = vocab_size_detected
+            
+            # Ensure dim_att is set correctly (will be set to n_embd in model.__init__ if 0)
+            # For RWKV-7, dim_att should equal n_embd
+            # Always update dim_att to match n_embd when we detect a new n_embd
+            if args.n_embd == n_embd_detected:
+                if args.dim_att != n_embd_detected:
+                    old_dim_att = args.dim_att
+                    args.dim_att = n_embd_detected
+                    rank_zero_info(f"Set dim_att={args.dim_att} (was {old_dim_att}, should equal n_embd={n_embd_detected} for RWKV-7)")
+            elif args.dim_att == 0:
+                args.dim_att = n_embd_detected
+                rank_zero_info(f"Set dim_att={args.dim_att} (should equal n_embd={n_embd_detected} for RWKV-7)")
+            
+            # Verify head configuration if we detected n_head
+            if n_head_detected is not None:
+                expected_n_head = args.dim_att // args.head_size_a
+                if n_head_detected != expected_n_head:
+                    rank_zero_info(f"Warning: Detected n_head={n_head_detected} from checkpoint, but calculated n_head={expected_n_head} from dim_att={args.dim_att} / head_size={args.head_size_a}")
+                    # If there's a mismatch and dim_att was just updated, recalculate
+                    if args.dim_att == n_embd_detected:
+                        expected_n_head = args.dim_att // args.head_size_a
+                        if n_head_detected == expected_n_head:
+                            rank_zero_info(f"✓ Head count now matches after setting dim_att={args.dim_att}")
+
     from src.trainer import train_callback
     from world.model import RWKV
     from world.dataset import WorldDataset
     from world.world_load import WorldLoading
 
     model = WorldLoading(args)
-
-
+    
     rank_zero_info(f"########## Loading {args.load_model}... ##########")
     model.load_state_dict(torch.load(
         args.load_model, map_location="cpu", weights_only=True), strict=False)

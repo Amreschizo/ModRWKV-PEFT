@@ -95,6 +95,10 @@ class GlobalIndexManager:
         else:
             idx = self.current_idx * self.device_num + self.rank 
             self.current_idx += 1
+        # #region agent log
+        with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+            f.write(f'{{"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"dataset.py:get_next_idx","message":"Index manager generated index","data":{{"input_idx_t":{idx_t},"output_idx":{idx},"shuffle":{self.shuffle},"current_idx":{self.current_idx},"device_num":{self.device_num},"rank":{self.rank}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+        # #endregion
         return idx
 
 class MyDataModule(L.LightningDataModule):
@@ -143,13 +147,27 @@ class WorldDataset(Dataset):
                 self.data = list(file)
         elif args.data_type=='visual':
             import jsonlines
-            # with open(f'{args.data_file}/chat.json', 'r', encoding='utf-8') as file:
-            #     self.data = json.load(file)          
-            with jsonlines.open(f'{args.data_file}/chat.jsonl') as file:
-                self.data = list(file)
+            # Support both chat.json (JSON array) and chat.jsonl (JSONL format)
+            chat_json_path = f'{args.data_file}/chat.json'
+            chat_jsonl_path = f'{args.data_file}/chat.jsonl'
+            
+            if os.path.exists(chat_json_path):
+                # Load JSON array format (original LLaVA-CC3M format)
+                with open(chat_json_path, 'r', encoding='utf-8') as file:
+                    self.data = json.load(file)
+            elif os.path.exists(chat_jsonl_path):
+                # Load JSONL format (one JSON object per line)
+                with jsonlines.open(chat_jsonl_path) as file:
+                    self.data = list(file)
+            else:
+                raise FileNotFoundError(f"Neither chat.json nor chat.jsonl found in {args.data_file}")
+            # #region agent log
+            with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+                data_len = len(self.data) if self.data is not None else 0
+                f.write(f'{{"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"dataset.py:__init__:visual","message":"Data loaded for visual type","data":{{"data_len":{data_len},"data_file":"{args.data_file}","is_list":{isinstance(self.data, list)},"is_empty":{data_len == 0}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+            # #endregion
         elif args.data_type == 'arrow':
             from datasets import load_from_disk, concatenate_datasets, load_dataset
-            import os
             
             # 获取主目录下所有子目录
             subdirs = [os.path.join(args.data_file, d) for d in os.listdir(args.data_file) 
@@ -202,13 +220,40 @@ class WorldDataset(Dataset):
         self.rank = rank
         self.world_size = world_size
         self.index_manager = GlobalIndexManager(rank=rank, device_num=devices, shuffle=shuffle)
+        # #region agent log
+        with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+            actual_data_len = len(self.data) if hasattr(self, 'data') and self.data is not None else 0
+            f.write(f'{{"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"dataset.py:setup","message":"Dataset setup complete","data":{{"rank":{rank},"world_size":{world_size},"devices":{devices},"shuffle":{shuffle},"actual_data_len":{actual_data_len}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+        # #endregion
     
     def __len__(self):
+        # #region agent log
+        with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+            actual_data_len = len(self.data) if hasattr(self, 'data') and self.data is not None else 0
+            computed_len = self.args.epoch_steps * self.args.micro_bsz
+            f.write(f'{{"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"dataset.py:__len__","message":"Dataset length calculation","data":{{"actual_data_len":{actual_data_len},"computed_len":{computed_len},"epoch_steps":{self.args.epoch_steps},"micro_bsz":{self.args.micro_bsz}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+        # #endregion
         return self.args.epoch_steps * self.args.micro_bsz
 
 
     def __getitem__(self, idx):
+        # #region agent log
+        with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+            actual_data_len = len(self.data) if hasattr(self, 'data') and self.data is not None else 0
+            f.write(f'{{"sessionId":"debug-session","runId":"post-fix","hypothesisId":"A,B,C","location":"dataset.py:__getitem__:entry","message":"__getitem__ called","data":{{"requested_idx":{idx},"actual_data_len":{actual_data_len},"has_index_manager":{self.index_manager is not None},"data_type":"{self.args.data_type}"}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+        # #endregion
         idx = self.index_manager.get_next_idx(idx_t=idx) if self.index_manager else idx
+        
+        # Wrap index to handle cases where __len__() returns more than actual data size
+        # This allows the dataset to repeat data across epochs
+        actual_data_len = len(self.data) if hasattr(self, 'data') and self.data is not None else 0
+        if actual_data_len > 0:
+            idx = idx % actual_data_len
+        
+        # #region agent log
+        with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+            f.write(f'{{"sessionId":"debug-session","runId":"post-fix","hypothesisId":"B,C","location":"dataset.py:__getitem__:after_wrap","message":"Index after wrapping","data":{{"final_idx":{idx},"actual_data_len":{actual_data_len},"idx_in_bounds":{idx < actual_data_len if actual_data_len > 0 else False}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+        # #endregion
         args = self.args
 
         if args.data_type =='hf':
@@ -220,6 +265,11 @@ class WorldDataset(Dataset):
             text_tokens = torch.tensor(pipeline.encode(f'\x16Assistant: {data_answer}\x17'))
             text_labels = text_tokens
         elif args.data_type == 'visual':
+            # #region agent log
+            with open('/home/amreschizo/Documents/.cursor/debug.log', 'a') as f:
+                actual_data_len = len(self.data) if hasattr(self, 'data') and self.data is not None else 0
+                f.write(f'{{"sessionId":"debug-session","runId":"post-fix","hypothesisId":"A","location":"dataset.py:__getitem__:before_access","message":"About to access self.data[idx]","data":{{"idx":{idx},"actual_data_len":{actual_data_len},"will_fail":{idx >= actual_data_len if actual_data_len > 0 else True}}},"timestamp":{int(__import__("time").time()*1000)}}}\n')
+            # #endregion
 
             img_name = self.data[idx]['image']
             conversation_text = self.data[idx]['conversations']

@@ -67,7 +67,7 @@ class SiglipEncoder(nn.Module):
         self.device = device
         self.model = AutoModel.from_pretrained(encoder_path).vision_model
         self.image_processor = SiglipImageProcessor.from_pretrained(encoder_path)
-        self.encoder_dim = 768  #self.model.config.hidden_size
+        self.encoder_dim = self.model.config.hidden_size  # Auto-detect encoder dimension
 
         self.adapter = VisualAdapter(self.encoder_dim, project_dim)
     def forward(self, x):

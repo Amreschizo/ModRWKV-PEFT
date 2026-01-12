@@ -25,10 +25,10 @@ class RWKV(pl.LightningModule):
     def __init__(self, args, modality=None):
         super().__init__()
         self.args = args
-        if not hasattr(args, 'dim_att'):
+        if not hasattr(args, 'dim_att') or args.dim_att == 0:
             args.dim_att = args.n_embd
-        if not hasattr(args, 'dim_ffn'):
-            args.dim_ffn = args.n_embd * 4
+        if not hasattr(args, 'dim_ffn') or args.dim_ffn == 0:
+            args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32)  # Default = 3.5x emb size, rounded to 32
 
         assert args.n_embd % 32 == 0
         assert args.dim_att % 32 == 0

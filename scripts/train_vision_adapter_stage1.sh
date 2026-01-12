@@ -15,14 +15,19 @@ encoder_path=encoders/siglip2-so400m-patch14-384
 encoder_type=siglip
 
 # Model architecture (for RWKV7-2.9B)
-# These will be auto-detected from the model file, but you can override if needed
+# These will be AUTO-DETECTED from the checkpoint file, but you can override if needed
 # Typical values for RWKV7-2.9B: n_layer=24, n_embd=1024 or n_layer=32, n_embd=2560
-# Check your model file to confirm the exact architecture
+# The script will automatically detect the correct values from the checkpoint
+# These defaults are only used if auto-detection fails
 n_layer=24
 n_embd=1024
 
 # Training hyperparameters (from ModRWKV paper Table 9 - Step1)
-micro_bsz=256  # Batch size from paper
+# Note: Reduced batch size for memory constraints with large model (n_embd=2560, n_layer=32)
+# Original paper used 256, but with RWKV-7-2.9B, use smaller batch size
+# Effective batch size = micro_bsz * gradient_accumulation_steps
+micro_bsz=32  # Reduced from 256 to fit in GPU memory
+gradient_accumulation_steps=8  # Maintain effective batch size of 256 (32 * 8)
 epoch_save=1
 epoch_steps=10000  # Adjust based on dataset size
 ctx_len=2048
@@ -36,7 +41,7 @@ lr_schedule=wsd  # From paper
 
 # Hardware configuration
 accelerator=gpu
-devices=1  # Adjust based on your GPU setup
+devices=2  # Use both GPUs for distributed training
 precision=bf16
 strategy=deepspeed_stage_1
 grad_cp=1
@@ -44,14 +49,16 @@ grad_cp=1
 # Quantization (4-bit for LLM, even though it's frozen in Stage 1)
 quant=4bit
 
-# First, convert chat.json to chat.jsonl if needed
-if [ ! -f "${data_file}/chat.jsonl" ]; then
-    echo "Converting chat.json to chat.jsonl..."
-    python3 convert_chat_json_to_jsonl.py "${data_file}/chat.json" "${data_file}/chat.jsonl"
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to convert chat.json to chat.jsonl"
-        exit 1
-    fi
+# Check dataset format - the code now supports both chat.json and chat.jsonl
+if [ ! -f "${data_file}/chat.json" ] && [ ! -f "${data_file}/chat.jsonl" ]; then
+    echo "Error: Neither chat.json nor chat.jsonl found in ${data_file}"
+    exit 1
+fi
+
+if [ -f "${data_file}/chat.json" ]; then
+    echo "Found chat.json - will use JSON array format (original LLaVA format)"
+elif [ -f "${data_file}/chat.jsonl" ]; then
+    echo "Found chat.jsonl - will use JSONL format"
 fi
 
 # Extract images from zip if needed
@@ -76,7 +83,7 @@ echo "Dataset: $data_file ($data_type)"
 echo "Output: $proj_dir"
 echo "================================================"
 
-HF_ENDPOINT="https://hf-mirror.com" python world_train.py \
+HF_ENDPOINT="https://hf-mirror.com" python3 world_train.py \
 --load_model $load_model \
 --proj_dir $proj_dir \
 --data_file $data_file \
@@ -106,7 +113,8 @@ HF_ENDPOINT="https://hf-mirror.com" python world_train.py \
 --encoder_type $encoder_type \
 --my_testing "x070" \
 --train_step adapter \
---quant $quant
+--quant $quant \
+--accumulate_grad_batches $gradient_accumulation_steps
 
 echo ""
 echo "Stage 1 training complete!"
