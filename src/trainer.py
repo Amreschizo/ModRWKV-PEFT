@@ -188,12 +188,28 @@ class train_callback(pl.Callback):
                     to_save_dict = pl_module.state_dict()
                 rwkv_dict={}
                 for k, state in to_save_dict.items():
+                    # Skip modality encoder model if not training
                     if 'world_encoder.model'  in k and 'moda' not in args.train_step:
                         continue
 
+                    # Skip adapter if not training
                     if 'world_encoder.adapter'  in k and 'adapter' not in args.train_step:
                         continue
-                    rwkv_dict[k] = state
+                    
+                    # When using PEFT, save LoRA weights (they have 'lora_' prefix)
+                    # Also save base model if full fine-tuning, but skip if PEFT-only
+                    if hasattr(args, 'peft') and args.peft != 'none':
+                        # Save LoRA weights and adapter weights
+                        if 'lora_' in k or 'world_encoder.adapter' in k:
+                            rwkv_dict[k] = state
+                        # Skip base RWKV weights when using PEFT (only save LoRA adapters)
+                        elif 'blocks.' in k or 'emb.' in k or 'ln_out.' in k or 'head.' in k:
+                            continue  # Skip base RWKV weights in PEFT mode
+                        else:
+                            rwkv_dict[k] = state
+                    else:
+                        # Full fine-tuning: save all weights
+                        rwkv_dict[k] = state
                 to_save_dict = rwkv_dict
 
                 # my_save(

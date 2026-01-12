@@ -1,13 +1,14 @@
 torch
 torchvision
-bitsandbytes
+bitsandbytes>=0.48.1
 deepspeed
 einops
 triton
 rwkv-fla
 rwkv
 transformers
-lightning
+peft
+lightning>=2.0.0
 datasets
 Pillow
 librosa

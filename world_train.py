@@ -77,12 +77,20 @@ def rwkv_train():
     parser.add_argument("--my_exit", default=99999999, type=int)
     parser.add_argument("--my_exit_tokens", default=0, type=int)
 
-    parser.add_argument("--peft", default="none", type=str)# lora pissa bone
+    parser.add_argument("--peft", default="none", type=str)# lora pissa miss adalora prefix
     #parser.add_argument("--train_parts", default=["time", "ln"], type=list)##emb , head
     parser.add_argument("--train_parts", default=["time", "ln"], nargs='*', help="List of parts to train emb head time ln")
 
     #LORA
     parser.add_argument("--lora_config", default='{"lora_load":"", "lora_r":8, "lora_alpha":32, "lora_dropout":0.01}', type=json.loads)
+    
+    #PEFT config (JSON string for flexible PEFT configuration)
+    parser.add_argument(
+        "--peft_config",
+        type=str,
+        default='{"r":8, "lora_alpha":32, "lora_dropout":0.01}',
+        help="PEFT config JSON string, e.g. '{\"r\":8, \"lora_alpha\":32, \"lora_dropout\":0.05, \"target_modules\":[\"receptance\",\"key\",\"value\",\"output\"]}'"
+    )
 
 
     # #LISA
@@ -96,7 +104,7 @@ def rwkv_train():
 
 
     #quant
-    parser.add_argument("--quant", default="none", type=str)
+    parser.add_argument("--quant", default="none", type=str, help="Quantization type: 'none', '4bit', '8bit'")
 
     #dataset
     parser.add_argument("--dataload", default="get", type=str)
@@ -278,6 +286,14 @@ def rwkv_train():
     rank_zero_info(f"########## Loading {args.load_model}... ##########")
     model.load_state_dict(torch.load(
         args.load_model, map_location="cpu", weights_only=True), strict=False)
+    
+    # Apply quantization AFTER loading weights (for QLoRA)
+    # Quantization only applies to RWKV backbone, not modality encoders
+    if hasattr(args, 'quant') and args.quant != 'none':
+        from src.peft_loading import apply_quantization_to_model
+        rank_zero_info(f"########## Applying {args.quant} quantization to RWKV backbone... ##########")
+        model = apply_quantization_to_model(model, args.quant)
+        rank_zero_info("########## Quantization applied successfully ##########")
 
 
     if pl.__version__[0]=='2':
